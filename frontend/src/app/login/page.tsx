@@ -38,12 +38,12 @@ export default function LoginPage() {
           <div className="space-y-4">
             <input
               type="email" required placeholder="Email address"
-              className="w-full px-4 py-3 rounded-lg border focus:ring-2 focus:ring-indigo-600 outline-none"
+              className="w-full px-4 py-3 rounded-lg border text-gray-900 bg-white placeholder-gray-400 focus:ring-2 focus:ring-indigo-600 outline-none"
               value={email} onChange={(e) => setEmail(e.target.value)}
             />
             <input
               type="password" required placeholder="Password"
-              className="w-full px-4 py-3 rounded-lg border focus:ring-2 focus:ring-indigo-600 outline-none"
+              className="w-full px-4 py-3 rounded-lg border text-gray-900 bg-white placeholder-gray-400 focus:ring-2 focus:ring-indigo-600 outline-none"
               value={password} onChange={(e) => setPassword(e.target.value)}
             />
           </div>

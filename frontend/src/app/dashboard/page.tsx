@@ -115,7 +115,7 @@ export default function DashboardPage() {
                 value={newSubjectName}
                 onChange={(e) => setNewSubjectName(e.target.value)}
                 placeholder="Subject Name (e.g. Math)"
-                className="w-full px-3 py-2 border rounded-md text-sm outline-none focus:ring-1 focus:ring-indigo-500"
+                className="w-full px-3 py-2 border rounded-md text-sm text-gray-900 bg-white placeholder-gray-400 outline-none focus:ring-1 focus:ring-indigo-500"
                 autoFocus
                 onKeyDown={(e) => e.key === 'Enter' && handleCreateSubject()}
               />
