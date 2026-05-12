@@ -13,6 +13,8 @@ import { getSocket, disconnectSocket } from '../../../lib/socket';
 import { useWebRTC } from '../../../hooks/useWebRTC';
 import { useStudyTimer } from '../../../hooks/useStudyTimer';
 import Cookies from 'js-cookie';
+import { useAuthStore } from '../../../store/authStore';
+import axios from '../../../lib/axios';
 
 // ── Types ─────────────────────────────────────────────────────────
 interface Participant {
@@ -38,8 +40,8 @@ export default function MeetingRoomPage() {
   const router = useRouter();
 
   // ── Refs ─────────────────────────────────────────────────────
-  const localVideoRef = useRef<HTMLVideoElement>(null);
   const socketRef = useRef<ReturnType<typeof getSocket> | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   // ── State ────────────────────────────────────────────────────
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -56,7 +58,7 @@ export default function MeetingRoomPage() {
 
   // ── WebRTC & Timer Hooks ─────────────────────────────────────
   const { peers, initiateOffer, removePeer } = useWebRTC({
-    socket: socketRef.current,
+    socketRef,
     roomId,
     localStream,
   });
@@ -76,15 +78,14 @@ export default function MeetingRoomPage() {
       });
 
       setLocalStream(stream);
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
+      streamRef.current = stream;
       return stream;
     } catch (err) {
       // Graceful degradation — try audio only
       try {
         const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         setLocalStream(audioStream);
+        streamRef.current = audioStream;
         setIsCamOn(false);
         toast('Camera not available. Joining with audio only.', { icon: '📷' });
         return audioStream;
@@ -97,8 +98,16 @@ export default function MeetingRoomPage() {
 
   // ── 2. Connect to socket and join room ───────────────────────
   const connectAndJoin = useCallback(async (stream: MediaStream) => {
-    const token = Cookies.get('accessToken');
+    let token = useAuthStore.getState().token;
     if (!token) {
+      const authStorage = localStorage.getItem('study-buddy-auth');
+      if (authStorage) {
+        try { token = JSON.parse(authStorage)?.state?.token; } catch (e) { }
+      }
+    }
+
+    if (!token) {
+      toast.error("Authentication lost. Please log in again.");
       router.push('/login');
       return;
     }
@@ -106,25 +115,28 @@ export default function MeetingRoomPage() {
     const socket = getSocket(token);
     socketRef.current = socket;
 
-    socket.on('connect', () => {
+    // WAKE UP: Force connection if a previous render disconnected it
+    if (!socket.connected) {
+      socket.connect();
+    }
+
+    // ── THE FIX: Wrap the join logic so we can call it instantly ──
+    const performJoin = () => {
+      console.log("Socket connected! ID:", socket.id); // <--- ADD THIS
       setMySocketId(socket.id ?? '');
 
+      console.log("Emitting join-room to backend..."); // <--- ADD THIS
       // Join the room via socket
       socket.emit(
         'join-room',
         { roomId },
-        (response: {
-          error?: string;
-          success?: boolean;
-          participants?: Participant[];
-          studyMode?: 'discussion' | 'silent';
-          timer?: { isRunning: boolean; remaining: number; phase: 'focus' | 'break' };
-          isCaptain?: boolean;
-        }) => {
+        (response: any) => {
+          console.log("Backend replied!", response); // <--- ADD THIS
           setIsConnecting(false);
 
           if (response.error) {
             toast.error(response.error);
+            streamRef.current?.getTracks().forEach((t) => t.stop());
             router.push('/dashboard');
             return;
           }
@@ -133,22 +145,29 @@ export default function MeetingRoomPage() {
           setStudyMode(response.studyMode ?? 'discussion');
           setIsCaptain(response.isCaptain ?? false);
 
-          // ─── Initiate WebRTC with all existing participants ───
-          // Each existing participant will receive our offer
-          response.participants?.forEach((participant) => {
+          // Initiate WebRTC with existing participants
+          response.participants?.forEach((participant: any) => {
             if (participant.socketId !== socket.id) {
               initiateOffer(participant.socketId, participant.name, participant.avatar);
             }
           });
         }
       );
-    });
+    };
 
-    // ─── Room participant events ──────────────────────────────
-    socket.on('user-joined', (participant: Participant) => {
+    // ── Check if already connected! ──
+    if (socket.connected) {
+      console.log("Already connected, joining instantly...");
+      performJoin(); 
+    } else {
+      console.log("Waiting for connection event...");
+      socket.once('connect', performJoin); // <--- CHANGE .on TO .once
+    }
+
+    // ─── Room participant events (Keep these exactly the same) ───
+    socket.on('user-joined', (participant: any) => {
       setParticipants((prev) => [...prev, participant]);
       toast(`${participant.name} joined`, { icon: '👋', duration: 2000 });
-      // New joiners will send us an offer — we don't initiate here
     });
 
     socket.on('user-left', ({ socketId, name }: { socketId: string; name: string }) => {
@@ -210,6 +229,21 @@ export default function MeetingRoomPage() {
     let mounted = true;
 
     (async () => {
+      // 1. PRE-CHECK: Verify the room is active BEFORE touching the camera
+      try {
+        const { data } = await axios.get(`/api/meetings/room/${roomId}`);
+        if (data.meeting.status === 'ended') {
+          toast.error('This meeting has ended.');
+          router.push('/dashboard');
+          return; // Stop execution here! Camera never turns on.
+        }
+      } catch (err: any) {
+        toast.error(err.response?.data?.message || 'Room not found.');
+        router.push('/dashboard');
+        return; // Stop execution if room doesn't exist.
+      }
+
+      // 2. Only if the room is active, initialize media and join
       const stream = await initLocalMedia();
       if (stream && mounted) {
         await connectAndJoin(stream);
@@ -219,10 +253,10 @@ export default function MeetingRoomPage() {
     return () => {
       mounted = false;
       // Cleanup: stop local tracks and disconnect
-      localStream?.getTracks().forEach((track) => track.stop());
+      streamRef.current?.getTracks().forEach((track) => track.stop());
       disconnectSocket();
     };
-  }, []); // eslint-disable-line
+  }, []);
 
   // ── Media Controls ───────────────────────────────────────────
   const toggleCamera = () => {
@@ -278,7 +312,7 @@ export default function MeetingRoomPage() {
   }
 
   return (
-    <div className="min-h-screen bg-[#0d0d14] flex flex-col text-white font-['DM_Sans',_sans-serif]">
+    <div className="min-h-screen bg-[#0d0d14] flex flex-col text-white font-['DM_Sans',sans-serif]">
 
       {/* ── Top Bar ─────────────────────────────────────────── */}
       <header className="flex items-center justify-between px-6 py-3 border-b border-white/10 bg-[#12121e]">
@@ -309,26 +343,31 @@ export default function MeetingRoomPage() {
 
         {/* ── Video Grid ───────────────────────────────────── */}
         <main className="flex-1 p-4 overflow-auto">
-          <div className={`grid gap-3 h-full ${
-            peers.size === 0 ? 'grid-cols-1' :
+          <div className={`grid gap-3 h-full ${peers.size === 0 ? 'grid-cols-1' :
             peers.size === 1 ? 'grid-cols-2' :
-            peers.size <= 3 ? 'grid-cols-2' :
-            'grid-cols-3'
-          }`}>
+              peers.size <= 3 ? 'grid-cols-2' :
+                'grid-cols-3'
+            }`}>
 
             {/* Local Video */}
             <div className="relative rounded-2xl overflow-hidden bg-[#1a1a2e] border border-white/10 group aspect-video">
               <video
-                ref={localVideoRef}
+                // Use a callback ref so React NEVER loses the video stream on re-renders
+                ref={(el) => {
+                  if (el && localStream && el.srcObject !== localStream) {
+                    el.srcObject = localStream;
+                  }
+                }}
                 autoPlay
                 playsInline
                 muted  // Always mute local (avoid echo)
-                className={`w-full h-full object-cover ${!isCamOn ? 'hidden' : ''}`}
+                // Use opacity instead of 'hidden' so the browser doesn't pause the video
+                className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-200 ${!isCamOn ? 'opacity-0 pointer-events-none' : 'opacity-100'
+                  }`}
               />
               {!isCamOn && (
-                <div className="w-full h-full flex items-center justify-center bg-[#1a1a2e]">
+                <div className="absolute inset-0 flex items-center justify-center bg-[#1a1a2e]">
                   <div className="w-20 h-20 rounded-full bg-indigo-600/30 flex items-center justify-center text-3xl">
-                    {/* User initials */}
                     <span className="font-bold text-indigo-300">ME</span>
                   </div>
                 </div>
@@ -357,7 +396,9 @@ export default function MeetingRoomPage() {
                     autoPlay
                     playsInline
                     ref={(el) => {
-                      if (el && peer.stream) el.srcObject = peer.stream;
+                      if (el && peer.stream && el.srcObject !== peer.stream) {
+                        el.srcObject = peer.stream;
+                      }
                     }}
                     className="w-full h-full object-cover"
                   />
@@ -474,25 +515,25 @@ export default function MeetingRoomPage() {
               {participants
                 .filter((p) => p.socketId !== mySocketId)
                 .map((p) => (
-                <div key={p.socketId} className="flex items-center gap-2.5 p-2 rounded-lg hover:bg-white/5 transition-colors group">
-                  <div className="w-8 h-8 rounded-full bg-purple-600 flex items-center justify-center text-xs font-bold shrink-0">
-                    {p.name.charAt(0).toUpperCase()}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-white truncate">{p.name}</p>
-                    {p.isCaptain && <p className="text-[10px] text-amber-400 flex items-center gap-1"><Crown size={8} /> Captain</p>}
-                  </div>
-                  {!p.isCaptain && (
-                    <button
-                      onClick={() => initiateKick(p.socketId)}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-red-400
+                  <div key={p.socketId} className="flex items-center gap-2.5 p-2 rounded-lg hover:bg-white/5 transition-colors group">
+                    <div className="w-8 h-8 rounded-full bg-purple-600 flex items-center justify-center text-xs font-bold shrink-0">
+                      {p.name.charAt(0).toUpperCase()}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-white truncate">{p.name}</p>
+                      {p.isCaptain && <p className="text-[10px] text-amber-400 flex items-center gap-1"><Crown size={8} /> Captain</p>}
+                    </div>
+                    {!p.isCaptain && (
+                      <button
+                        onClick={() => initiateKick(p.socketId)}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-red-400
                                  hover:text-red-300 font-semibold px-1.5 py-0.5 rounded border border-red-500/30 hover:border-red-400/50"
-                    >
-                      Kick
-                    </button>
-                  )}
-                </div>
-              ))}
+                      >
+                        Kick
+                      </button>
+                    )}
+                  </div>
+                ))}
             </div>
           )}
 
@@ -622,7 +663,7 @@ export default function MeetingRoomPage() {
             className="w-14 h-12 rounded-2xl bg-red-600 hover:bg-red-500 flex items-center justify-center
                        transition-all shadow-lg shadow-red-900/30 active:scale-95"
           >
-            <Phone size={18} className="rotate-[135deg] text-white" />
+            <Phone size={18} className="rotate-135 text-white" />
           </button>
 
           {/* Participants sidebar toggle */}

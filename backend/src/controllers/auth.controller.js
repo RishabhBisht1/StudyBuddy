@@ -1,6 +1,7 @@
-import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 import { signToken, sendTokenResponse } from '../utils/jwt.js';
+import sendEmail from '../utils/sendEmail.js';
 
 // ── REGISTER ─────────────────────────────────────────────────────
 export const register = async (req, res, next) => {
@@ -118,3 +119,91 @@ export const googleCallback = (req, res) => {
     `${process.env.FRONTEND_URL}/auth/google/success?token=${token}`
   );
 };
+
+// ── FORGOT PASSWORD ──────────────────────────────────────────────
+export const forgotPassword = async (req, res, next) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email is required.' });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
+
+    // Security: Always return generic success message to prevent account enumeration
+    const genericResponse = { 
+      success: true, 
+      message: 'If an account exists with that email, a password reset link has been sent.' 
+    };
+
+    if (!user || !user.password) {
+      // Return success even if user not found or is a Google-only user
+      return res.status(200).json(genericResponse);
+    }
+
+    // Generate a one-time use token valid for 15 minutes
+    // The secret is unique to this user and their current password hash
+    const resetSecret = process.env.JWT_SECRET + user.password;
+    const resetToken = jwt.sign({ id: user._id }, resetSecret, { expiresIn: '15m' });
+
+    const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
+
+    const message = `You requested a password reset. Please use the following link to reset your password (valid for 15 minutes):\n\n${resetUrl}\n\nIf you did not request this, please ignore this email.`;
+
+    try {
+      await sendEmail({
+        email: user.email,
+        subject: 'Password Reset Request',
+        message,
+      });
+
+      res.status(200).json(genericResponse);
+    } catch (err) {
+      console.error('Email could not be sent:', err);
+      // In production, you might not want to disclose email failure
+      res.status(200).json(genericResponse);
+    }
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── RESET PASSWORD ───────────────────────────────────────────────
+export const resetPassword = async (req, res, next) => {
+  try {
+    const { token, password } = req.body;
+
+    if (!token || !password) {
+      return res.status(400).json({ success: false, message: 'Token and new password are required.' });
+    }
+
+    // 1) Decode token (without verifying yet) to get user ID
+    const decoded = jwt.decode(token);
+    if (!decoded || !decoded.id) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired token.' });
+    }
+
+    // 2) Find user and get their current password hash
+    const user = await User.findById(decoded.id).select('+password');
+    if (!user) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired token.' });
+    }
+
+    // 3) Verify JWT with the one-time secret (Secret + old Password Hash)
+    const resetSecret = process.env.JWT_SECRET + user.password;
+    try {
+      jwt.verify(token, resetSecret);
+    } catch (err) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired token.' });
+    }
+
+    // 4) Update password (the pre-save hook in User model hashes this)
+    user.password = password;
+    await user.save();
+
+    res.status(200).json({ success: true, message: 'Password has been reset successfully.' });
+  } catch (err) {
+    next(err);
+  }
+};

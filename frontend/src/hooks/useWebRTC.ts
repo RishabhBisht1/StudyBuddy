@@ -9,7 +9,7 @@ interface Peer {
 }
 
 interface UseWebRTCOptions {
-  socket: Socket | null;
+  socketRef: React.MutableRefObject<Socket | null>;
   roomId: string;
   localStream: MediaStream | null;
 }
@@ -23,9 +23,16 @@ const ICE_SERVERS: RTCConfiguration = {
   ],
 };
 
-export const useWebRTC = ({ socket, roomId, localStream }: UseWebRTCOptions) => {
+export const useWebRTC = ({ socketRef, roomId, localStream }: UseWebRTCOptions) => {
   const [peers, setPeers] = useState<Map<string, Peer>>(new Map());
   const peersRef = useRef<Map<string, Peer>>(new Map());
+
+  // Use refs to avoid stale closures in callbacks
+  const streamRef = useRef(localStream);
+
+  useEffect(() => {
+    streamRef.current = localStream;
+  }, [localStream]);
 
   const updatePeers = (updater: (map: Map<string, Peer>) => Map<string, Peer>) => {
     peersRef.current = updater(new Map(peersRef.current));
@@ -36,16 +43,20 @@ export const useWebRTC = ({ socket, roomId, localStream }: UseWebRTCOptions) => 
   const createPeerConnection = useCallback(
     (targetSocketId: string, peerName: string, peerAvatar?: string): RTCPeerConnection => {
       const pc = new RTCPeerConnection(ICE_SERVERS);
+      const currentStream = streamRef.current;
+      const currentSocket = socketRef.current;
 
       // Add local tracks to the connection
-      localStream?.getTracks().forEach((track) => {
-        pc.addTrack(track, localStream);
-      });
+      if (currentStream) {
+        currentStream.getTracks().forEach((track) => {
+          pc.addTrack(track, currentStream);
+        });
+      }
 
       // Trickle ICE: send candidates as they're discovered
       pc.onicecandidate = (event) => {
-        if (event.candidate && socket) {
-          socket.emit('webrtc:ice-candidate', {
+        if (event.candidate && currentSocket) {
+          currentSocket.emit('webrtc:ice-candidate', {
             targetSocketId,
             candidate: event.candidate,
           });
@@ -79,13 +90,15 @@ export const useWebRTC = ({ socket, roomId, localStream }: UseWebRTCOptions) => 
 
       return pc;
     },
-    [socket, localStream]
+    []
   );
 
   // ── Initiate connection to an existing participant ───────────
   const initiateOffer = useCallback(
     async (targetSocketId: string, peerName: string, peerAvatar?: string) => {
-      if (!socket || !localStream) return;
+      const currentSocket = socketRef.current;
+      const currentStream = streamRef.current;
+      if (!currentSocket || !currentStream) return;
 
       const pc = createPeerConnection(targetSocketId, peerName, peerAvatar);
 
@@ -96,12 +109,12 @@ export const useWebRTC = ({ socket, roomId, localStream }: UseWebRTCOptions) => 
         });
         await pc.setLocalDescription(offer);
 
-        socket.emit('webrtc:offer', { targetSocketId, offer });
+        currentSocket.emit('webrtc:offer', { targetSocketId, offer });
       } catch (err) {
         console.error('Error creating offer:', err);
       }
     },
-    [socket, localStream, createPeerConnection]
+    [createPeerConnection]
   );
 
   // ── Handle incoming offer ────────────────────────────────────
@@ -111,7 +124,9 @@ export const useWebRTC = ({ socket, roomId, localStream }: UseWebRTCOptions) => 
       fromUser: { name: string; avatar?: string };
       offer: RTCSessionDescriptionInit;
     }) => {
-      if (!socket || !localStream) return;
+      const currentSocket = socketRef.current;
+      const currentStream = streamRef.current;
+      if (!currentSocket || !currentStream) return;
 
       const pc = createPeerConnection(fromSocketId, fromUser.name, fromUser.avatar);
 
@@ -120,12 +135,12 @@ export const useWebRTC = ({ socket, roomId, localStream }: UseWebRTCOptions) => 
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
 
-        socket.emit('webrtc:answer', { targetSocketId: fromSocketId, answer });
+        currentSocket.emit('webrtc:answer', { targetSocketId: fromSocketId, answer });
       } catch (err) {
         console.error('Error handling offer:', err);
       }
     },
-    [socket, localStream, createPeerConnection]
+    [createPeerConnection]
   );
 
   // ── Handle incoming answer ───────────────────────────────────
@@ -178,6 +193,7 @@ export const useWebRTC = ({ socket, roomId, localStream }: UseWebRTCOptions) => 
 
   // ── Socket event listeners ───────────────────────────────────
   useEffect(() => {
+    const socket = socketRef.current;
     if (!socket) return;
 
     socket.on('webrtc:offer', handleIncomingOffer);
@@ -189,7 +205,7 @@ export const useWebRTC = ({ socket, roomId, localStream }: UseWebRTCOptions) => 
       socket.off('webrtc:answer', handleIncomingAnswer);
       socket.off('webrtc:ice-candidate', handleIceCandidate);
     };
-  }, [socket, handleIncomingOffer, handleIncomingAnswer, handleIceCandidate]);
+  }, [socketRef.current, handleIncomingOffer, handleIncomingAnswer, handleIceCandidate]);
 
   return { peers, initiateOffer, removePeer };
 };

@@ -9,25 +9,52 @@ import toast from 'react-hot-toast';
 export default function DashboardPage() {
   const { user, isAuthenticated, logout } = useAuthStore();
   const router = useRouter();
-  
+
   const [subjects, setSubjects] = useState([]);
   const [selectedSubject, setSelectedSubject] = useState<any>(null);
   const [meetings, setMeetings] = useState([]);
-  
+
   // New state for creating subjects
   const [showSubjectInput, setShowSubjectInput] = useState(false);
   const [newSubjectName, setNewSubjectName] = useState('');
 
-  useEffect(() => {
-    if (!isAuthenticated) router.push('/login');
-    else fetchSubjects();
-  }, [isAuthenticated, router]);
+  // 1. Add a mounted state
+  const [isMounted, setIsMounted] = useState(false);
 
+  // 2. Set mounted to true once the browser takes over
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  // 3. Only run the auth check AFTER the component is mounted
+  useEffect(() => {
+    if (isMounted) {
+      if (!isAuthenticated) {
+        router.push('/login');
+      } else {
+        fetchSubjects();
+      }
+    }
+  }, [isAuthenticated, isMounted, router]); // include dependencies
+
+  // 4. Prevent the server-side render mismatch flash
+  if (!isMounted) return null;
+
+  if (!user) return null;
   const fetchSubjects = async () => {
     try {
       const { data } = await axios.get('/api/subjects');
       setSubjects(data.subjects);
-      if (data.subjects.length > 0) handleSelectSubject(data.subjects[0]);
+
+      if (data.subjects.length > 0) {
+        // 1. Check if we have a saved subject in memory
+        const lastSubjectId = localStorage.getItem('lastSelectedSubject');
+
+        // 2. Try to find that subject, otherwise fallback to the first one
+        const targetSubject = data.subjects.find((s: any) => s._id === lastSubjectId) || data.subjects[0];
+
+        handleSelectSubject(targetSubject);
+      }
     } catch (err) {
       toast.error('Failed to load subjects');
     }
@@ -35,6 +62,10 @@ export default function DashboardPage() {
 
   const handleSelectSubject = async (subject: any) => {
     setSelectedSubject(subject);
+
+    // 3. Save the clicked subject to memory!
+    localStorage.setItem('lastSelectedSubject', subject._id);
+
     try {
       const { data } = await axios.get(`/api/meetings/subject/${subject._id}`);
       setMeetings(data.meetings);
@@ -98,8 +129,8 @@ export default function DashboardPage() {
         <div className="col-span-1 bg-white rounded-xl shadow-sm border p-4 h-fit">
           <div className="flex justify-between items-center mb-4">
             <h2 className="text-sm font-bold text-gray-400 uppercase tracking-wider">Your Subjects</h2>
-            <button 
-              onClick={() => setShowSubjectInput(!showSubjectInput)} 
+            <button
+              onClick={() => setShowSubjectInput(!showSubjectInput)}
               className="text-indigo-600 hover:text-indigo-800 p-1 bg-indigo-50 rounded-md"
               title="Add Subject"
             >
@@ -131,9 +162,8 @@ export default function DashboardPage() {
               <button
                 key={sub._id}
                 onClick={() => handleSelectSubject(sub)}
-                className={`w-full text-left px-4 py-3 rounded-lg font-medium transition-colors ${
-                  selectedSubject?._id === sub._id ? 'bg-indigo-50 text-indigo-700' : 'text-gray-600 hover:bg-gray-50'
-                }`}
+                className={`w-full text-left px-4 py-3 rounded-lg font-medium transition-colors ${selectedSubject?._id === sub._id ? 'bg-indigo-50 text-indigo-700' : 'text-gray-600 hover:bg-gray-50'
+                  }`}
               >
                 {sub.name}
               </button>

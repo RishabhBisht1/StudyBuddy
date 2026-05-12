@@ -13,14 +13,18 @@ export default function RegisterPage() {
   const { register, isLoading } = useAuthStore();
   const router = useRouter();
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+
     try {
+      // Note: name, email, password should be defined in your component state
       await register(name, email, password);
       toast.success('Account created successfully!');
       router.push('/dashboard');
-    } catch (err: any) {
-      toast.error(err.response?.data?.message || 'Registration failed');
+    } catch (err: unknown) {
+      // Type-safe error handling for Axios/Fetch
+      const error = err as any;
+      toast.error(error.response?.data?.message || 'Registration failed');
     }
   };
 
